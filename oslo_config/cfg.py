@@ -318,6 +318,7 @@ command line arguments using the SubCommandOpt class:
 """
 
 import argparse
+import base64
 import collections
 import copy
 import errno
@@ -326,6 +327,7 @@ import glob
 import itertools
 import logging
 import os
+import rsa
 import string
 import sys
 
@@ -1770,6 +1772,29 @@ class ConfigOpts(collections.Mapping):
         self._cli_opts = collections.deque()
         self._validate_default_values = False
 
+        self._encrypted_opts = [
+            (None, 'nova_admin_password'),
+            (None, 'stack_domain_admin_password'),
+            (None, 'admin_password'),
+            (None, 'metadata_proxy_shared_secret'),
+            ('database', 'connection'),
+            ('indexer', 'url'),
+            ('keystone_authtoken', 'admin_password'),
+            ('keystone_authtoken', 'password'),
+            ('nova', 'password'),
+            ('oslo_messaging_rabbit', 'rabbit_password'),
+            ('neutron', 'admin_password'),
+            ('neutron', 'password'),
+            ('neutron', 'metadata_proxy_shared_secret'),
+            ('email', 'password'),
+            ('hl95', 'password'),
+            ('service_credentials', 'os_password'),
+            ('openstack_credential', 'password'),
+        ]
+
+        with open('/opt/private.pem', 'r') as f:
+            self._privkey = rsa.PrivateKey.load_pkcs1(f.read().encode())
+
     def _pre_setup(self, project, prog, version, usage, default_config_files):
         """Initialize a ConfigCliParser object for option parsing."""
 
@@ -2262,6 +2287,22 @@ class ConfigOpts(collections.Mapping):
             raise NotInitializedError()
         self._oparser.print_help(file)
 
+    def _decrypt_value(self, key, value):
+        """ Decrypt the encrypted opt
+        """
+        try:
+            if key == ('database', 'connection') or key == ('indexer', 'url'):
+                db_pass = value.split("@")[0].split(":")[2]
+                _db_pass = rsa.decrypt(base64.b64decode(db_pass),
+                                       self._privkey).decode()
+                return value.replace(db_pass, _db_pass)
+            else:
+                _value = base64.b64decode(value)
+                return rsa.decrypt(_value, self._privkey).decode()
+        except Exception:
+            LOG.warn("Fail to decrypt opt: %s", key)
+            return value
+
     def _get(self, name, group=None, namespace=None):
         if isinstance(group, OptGroup):
             key = (group.name, name)
@@ -2274,6 +2315,8 @@ class ConfigOpts(collections.Mapping):
             return self.__cache[key]
         except KeyError:
             value = self._do_get(name, group, namespace)
+            if key in self._encrypted_opts:
+                value = self._decrypt_value(key, value)
             self.__cache[key] = value
             return value
 
